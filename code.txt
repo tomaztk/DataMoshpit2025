@@ -1,0 +1,32 @@
+"""
+# Matching subgenres
+st.subheader("3) Top subgenre matches")
+g_names = list(genre_map.keys())
+G = np.array([genre_map[g] for g in g_names], dtype=float)
+sims = G @ listener_vec / (norm(G, axis=1) * norm(listener_vec))
+top_idx = np.argsort(-sims)[:5]
+top = [(g_names[i], float(sims[i])) for i in top_idx]
+st.dataframe(pd.DataFrame(top, columns=["Subgenre","Similarity (0–1)"]))
+
+# Band examples
+st.subheader("4) Band examples")
+def bands_for_subgenre(sub, k=12):
+    sub_norm = sub.lower()
+    mask = bands_df["Genre_norm"].str.contains(sub_norm, regex=False, na=False)
+    # fallback: if few results, also search by key tokens
+    if mask.sum() < k and " " in sub_norm:
+        for token in sub_norm.split():
+            if len(token) > 3:
+                mask |= bands_df["Genre_norm"].str.contains(token, regex=False, na=False)
+    return bands_df.loc[mask, ["Band","Country","Genre"]].drop_duplicates().head(k)
+
+for sub, score in top:
+    st.markdown(f"### {sub} — similarity **{score:.3f}**")
+    ex = bands_for_subgenre(sub)
+    if ex.empty:
+        st.info("No matches from the provided CSV. Try uploading a larger dataset (Kaggle Metal Archives).")
+    else:
+        st.dataframe(ex.reset_index(drop=True))
+
+st.caption("Exploratory recommender based on genre-level psychology correlations, not a clinical tool.")
+"""
