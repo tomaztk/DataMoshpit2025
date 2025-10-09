@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -50,10 +49,7 @@ genre_map = {
 
 GENRE_KEYS = sorted(genre_map.keys(), key=len, reverse=True)
 
-# levenstein? ali cosine?
-def cosine(a, b):
-    a = np.array(a); b = np.array(b)
-    return float(np.dot(a, b) / (norm(a) * norm(b)))
+
 
 def normalize_genre_text(s: str) -> str:
     s = (s or "").lower()
@@ -86,10 +82,22 @@ def load_bands(file) -> pd.DataFrame:
 # Sidebar for CSV
 #st.sidebar.header("Band dataset")
 #bands_df = pd.read_csv("demo_bands.csv")
-
+ 
+st.markdown("""
+<style>
+/* Larger base text */
+html, body, .markdown-text-container, .stMarkdown p { font-size: 1.05rem; }
+/* Make section titles tighter on small screens */
+h2, h3 { margin-top: 0.5rem; }
+/* Give expanders nice padding */
+details { border-radius: 12px; border: 1px solid #e5e7eb; padding: 0.35rem 0.6rem; margin-bottom: 0.6rem; }
+/* Make select sliders rows less cramped */
+[data-baseweb="select"] > div, .stSelectbox, .stSlider { margin-bottom: 0.35rem; }
+</style>
+""", unsafe_allow_html=True)
 
 # Questionnaire
-st.subheader("1) Questionnaire (rate 1–5)")
+st.subheader("1) Questionnaire (Likert rate 1–5) p.s.: We are not Psychologists! :) ")
 QUESTIONS = {
     "Openness": [
         "I enjoy discovering new or experimental music styles.",
@@ -157,32 +165,90 @@ st.subheader("2) Your trait profile")
 st.dataframe(pd.DataFrame({"Trait": TRAIT_NAMES, "Score (0–1)": listener_vec}).set_index("Trait"))
 
 
+def subgenre_similarity_df(listener_vec: np.ndarray) -> pd.DataFrame:
+    g_names = list(genre_map.keys())
+    G = np.array([genre_map[g] for g in g_names], dtype=float)
+    sims = G @ listener_vec / (norm(G, axis=1) * norm(listener_vec))
+    rec = pd.DataFrame({"Subgenre": g_names, "Similarity": sims})
+    return rec.sort_values("Similarity", ascending=False).reset_index(drop=True)
+
+rec_df = subgenre_similarity_df(listener_vec).head(5)
+
 st.subheader("3) Top subgenre matches")
-g_names = list(genre_map.keys())
-G = np.array([genre_map[g] for g in g_names], dtype=float)
-sims = G @ listener_vec / (norm(G, axis=1) * norm(listener_vec))
-top_idx = np.argsort(-sims)[:5]
-top = [(g_names[i], float(sims[i])) for i in top_idx]
-st.dataframe(pd.DataFrame(top, columns=["Subgenre","Similarity (0–1)"]))
+cols = st.columns(len(rec_df))
+for col, row in zip(cols, rec_df.itertuples(index=False)):
+    with col:
+        st.metric(label=row.Subgenre.title(), value=f"{row.Similarity:.3f}")
 
 
+# Band similarity
 
-# klapa....
-st.subheader("4) Band examples")
-def bands_for_subgenre(sub, k=6):
+def genre_vector_from_text(text: str):
+    g = normalize_genre_text(text)
+    matches = [k for k in GENRE_KEYS if k in g]
+    if not matches:
+        return None
+    vecs = np.array([genre_map[m] for m in matches], dtype=float)
+    return vecs.mean(axis=0)
+
+# levenstein? ali cosine?
+def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (norm(a) * norm(b)))
+
+
+#def cosine(a, b):
+#    a = np.array(a)
+#    b = np.array(b)
+#    return float(np.dot(a, b) / (norm(a) * norm(b)))
+
+
+_bands_df = load_bands("demo_bands.csv")  
+_bands_df["__vec"] = _bands_df["Genre"].apply(genre_vector_from_text)
+_scored = _bands_df.dropna(subset=["__vec"]).copy()
+_scored["__sim"] = _scored["__vec"].apply(lambda v: cosine_sim(np.array(v), listener_vec))
+_scored["__norm_genre"] = _scored["Genre"].astype(str).map(normalize_genre_text)
+
+
+#podzvrst! subgenre
+
+def sample_bands_for_subgenre(sub: str, k: int = 6, temperature: float = 0.6):
     sub_norm = sub.lower()
-    bands_df = load_bands("demo_bands.csv")
-    mask = bands_df["Genre_norm"].str.contains(sub_norm, regex=False, na=False)
-    if mask.sum() < k and " " in sub_norm:
-        for token in sub_norm.split():
-            if len(token) > 3:
-                mask |= bands_df["Genre_norm"].str.contains(token, regex=False, na=False)
-    return bands_df.loc[mask, ["Band","Country","Genre"]].drop_duplicates().head(k)
+    #just i n case! ....
+    cand = _scored.loc[
+        _scored["__norm_genre"].str.contains(sub_norm, regex=False, na=False),
+        ["Band", "Country", "Genre", "__sim"]
+    ].drop_duplicates() 
 
-for sub, score in top:
-    st.markdown(f"### {sub} — similarity **{score:.3f}**")
-    ex = bands_for_subgenre(sub)
+    if cand.empty:
+        if " " in sub_norm:
+            mask = pd.Series(False, index=_scored.index)
+            for tok in [t for t in sub_norm.split() if len(t) > 3]:
+                mask |= _scored["__norm_genre"].str.contains(tok, regex=False, na=False)
+            cand = _scored.loc[mask, ["Band", "Country", "Genre", "__sim"]].drop_duplicates()
+
+    if cand.empty:
+        return cand
+
+    #aadding calculation for better recommender showing on page- weighted based on traits and balblablabla....
+    sims = cand["__sim"].to_numpy(dtype=float)
+    sims = np.clip(sims, 1e-9, 1.0)
+    weights = sims ** (1.0 / max(1e-6, temperature))  
+    p = weights / weights.sum()
+
+    n = min(k, len(cand))
+    idx = np.random.choice(np.arange(len(cand)), size=n, replace=False, p=p)
+    picked = cand.iloc[idx].sort_values("__sim", ascending=False).rename(columns={"__sim": "Similarity"})
+    return picked
+
+
+st.subheader("4) Band examples (similarity-weighted)")
+for row in rec_df.itertuples(index=False):
+    sub, sim = row.Subgenre, row.Similarity
+    st.markdown(f"### {sub} — overall match **{sim:.3f}**")
+    ex = sample_bands_for_subgenre(sub, k=6, temperature=0.6)   # spremeni temepraturo, če se izkaže za preveč random! def vrednost itak 0.6
     st.dataframe(ex.reset_index(drop=True))
+
+
 
 #blablabla
 st.caption("Exploratory recommender based on psychology correlations, not a clinical tool and solely for purpse of Crazy Data Science.")
